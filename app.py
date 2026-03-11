@@ -41,14 +41,35 @@ if not st.session_state.startup_shown:
     st.session_state.startup_shown = True
 
 # Main App GUI
-st.title("Data Analyzer Pro")
+col_title, col_help = st.columns([3, 1])
+with col_title:
+    st.title("Data Analyzer Pro")
+if col_help.button("ℹ️ טיפים לשימוש בגרפים", use_container_width=True):
+    st.info("""
+    **הוראות שימוש בגרפים באפליקציה:**
+    - 🔍 **מידע מפורט (Hover):** העבר את העכבר על הגרף כדי לראות את ערכי ה-X וה-Y של כל נקודה.
+    - 👁️ **העלמת עמודות (Hide):** לחץ על שם השורה בצד ימין (Legend) כדי להעלים או לחשוף אותה בגרף. לחיצה כפולה תבודד רק אותה.
+    - 🖱️ **זום ותזוזה:** גלול עם גלגלת העכבר כדי לעשות זום פנימה והחוצה. לחץ וגרור כדי להזיז את המיקוד.
+    - 🎯 **איפוס ומירכוז:** עשית זום עמוק מדי? לחיצה כפולה (Double-Click) בכל מקום בגרף תמרכז אותו מחדש.
+    """)
+
+# Helper function to detect trigger pattern (all 0s, exactly one 1)
+def is_trigger_column(series):
+    if not pd.api.types.is_numeric_dtype(series):
+        return False
+    # Check if unique values are only 0 and 1
+    uniques = series.dropna().unique()
+    if set(uniques) <= {0, 1} or set(uniques) <= {0.0, 1.0}:
+        # Check if 1 appears exactly once
+        if (series == 1).sum() == 1:
+            return True
+    return False
 
 # --- 1. Upload Data ---
 st.header("1. Upload Data")
 uploaded_files = st.file_uploader("Upload CSV / Excel Files (Multiple allowed)", type=['csv', 'xlsx', 'xls'], accept_multiple_files=True)
 
 if uploaded_files:
-    # Read files into a dictionary of DataFrames
     datasets = {}
     for file in uploaded_files:
         try:
@@ -62,7 +83,6 @@ if uploaded_files:
     # --- 2. Configure Overlaps & Visualization ---
     st.header("2. Configure Visualization & Overlaps")
     
-    # Global settings
     col_glb1, col_glb2, col_glb3 = st.columns(3)
     with col_glb1:
         graph_title = st.text_input("Graph Title:", "Data Visualization")
@@ -76,7 +96,6 @@ if uploaded_files:
     file_configs = {}
     tabs = st.tabs(list(datasets.keys()))
     
-    # Per-file configuration
     for i, (file_name, df) in enumerate(datasets.items()):
         with tabs[i]:
             col1, col2 = st.columns(2)
@@ -106,6 +125,7 @@ if uploaded_files:
     
     with col_t1:
         show_average = st.checkbox("Show Average Line(s)")
+        auto_trigger = st.checkbox("Auto-Detect Triggers (0-1-0)", value=True, help="Will automatically find columns with a single '1' and remaining '0's and annotate them")
     
     with col_t2:
         apply_smoothing = st.checkbox("Apply Smoothing")
@@ -118,7 +138,35 @@ if uploaded_files:
     
     with col_t3:
         calculate_integral = st.checkbox("Calculate Integral (Area)")
+
+    # --- 4. Interactive Trimming (Cut) ---
+    st.header("4. Interactive Trimming (Cut Graph)")
+    st.markdown("Use this to isolate a specific X-range for plotting and integral computation. **Note:** Only applies if X is numeric.")
     
+    col_trim1, col_trim2, col_trim3, col_trim4 = st.columns(4)
+    with col_trim1:
+        trim_start = st.number_input("Start X (Trim)", value=0.0, step=1.0, key="trim_s")
+    with col_trim2:
+        trim_end = st.number_input("End X (Trim)", value=0.0, step=1.0, key="trim_e")
+        
+    # State for trim active
+    if 'trim_active' not in st.session_state:
+        st.session_state.trim_active = False
+
+    with col_trim3:
+        st.write("")
+        st.write("")
+        if st.button("Apply Trim (Cut)"):
+            st.session_state.trim_active = True
+    with col_trim4:
+        st.write("")
+        st.write("")
+        if st.button("Reset Trim"):
+            st.session_state.trim_active = False
+            
+    if st.session_state.trim_active:
+        st.warning(f"✂️ Graph is currently trimmed between X = {trim_start} and X = {trim_end}. Integrals will only calculate for this region.")
+
     st.divider()
 
     # --- Graphing ---
@@ -137,15 +185,27 @@ if uploaded_files:
         x_col = config['x_axis']
         x_raw = df[x_col].values
         
-        # Apply X offset. (Offsets are easier to apply to numeric data).
+        # Apply X offset
         if pd.api.types.is_numeric_dtype(df[x_col]):
             x_data = x_raw + config['x_offset']
             x_is_num = True
         else:
-            # If categorical, offset by index (not ideal, but workable for display)
             x_data = np.arange(len(x_raw)) + config['x_offset']
             x_is_num = False
             
+        # Optional: Auto-Detect Triggers in this file
+        trigger_annotations = []
+        if auto_trigger:
+            for c in df.columns:
+                if is_trigger_column(df[c]):
+                    trigger_idx = df.index[df[c] == 1].tolist()[0]
+                    trigger_x = x_data[trigger_idx]
+                    trigger_y = 1 + config['y_offset'] # Approximate location
+                    trigger_annotations.append({
+                        'x': trigger_x,
+                        'name': c
+                    })
+
         for y_col in config['y_axes']:
             has_valid_data = True
             y_data = df[y_col].values
@@ -170,10 +230,24 @@ if uploaded_files:
             
             trace_name = f"{file_name} - {y_col}{name_suffix}"
             
+            # TRIMMING LOGIC
+            plot_x_final = x_data
+            plot_y_final = plot_y
+            
+            if st.session_state.trim_active and x_is_num:
+                # Filter points where X is within range
+                mask = (x_data >= trim_start) & (x_data <= trim_end)
+                plot_x_final = x_data[mask]
+                plot_y_final = plot_y[mask]
+                
+            # If after trimming there's no data, skip
+            if len(plot_x_final) == 0:
+                continue
+
             # Plot series
             fig.add_trace(go.Scatter(
-                x=x_raw if not x_is_num else x_data, 
-                y=plot_y, 
+                x=plot_x_final, 
+                y=plot_y_final, 
                 mode='lines', 
                 name=trace_name,
                 line=dict(color=colors[color_idx % len(colors)], width=2)
@@ -181,7 +255,7 @@ if uploaded_files:
             
             # Average
             if show_average:
-                avg_val = np.nanmean(y_data_shifted)
+                avg_val = np.nanmean(plot_y_final)
                 fig.add_hline(y=avg_val, line_dash="dash", line_color=colors[color_idx % len(colors)], 
                               annotation_text=f"Avg ({y_col}): {avg_val:.2f}")
             
@@ -189,16 +263,35 @@ if uploaded_files:
             if calculate_integral:
                 try:
                     if x_is_num:
-                        sort_idx = np.argsort(x_data)
-                        area = simpson(y=plot_y[sort_idx], x=x_data[sort_idx])
+                        sort_idx = np.argsort(plot_x_final)
+                        area = simpson(y=plot_y_final[sort_idx], x=plot_x_final[sort_idx])
                         integral_results.append(f"**{trace_name}**: {area:.4f}")
                     else:
-                        area = simpson(y=plot_y, dx=1.0)
+                        area = simpson(y=plot_y_final, dx=1.0)
                         integral_results.append(f"**{trace_name}**: {area:.4f} (dx=1)")
                 except Exception as e:
                     integral_results.append(f"**{trace_name}**: Error computing area")
             
             color_idx += 1
+            
+        # Process trigger annotations onto the graph
+        for trig in trigger_annotations:
+            # Only show trigger if it falls within the trimmed region (if active)
+            if st.session_state.trim_active and (trig['x'] < trim_start or trig['x'] > trim_end):
+                continue
+                
+            fig.add_vline(x=trig['x'], line_dash="dot", line_color="red", 
+                        annotation_text=f"Trigger: {trig['name']}<br>(X={trig['x']:.2f})", 
+                        annotation_position="top right",
+                        annotation_font_color="red")
+            fig.add_trace(go.Scatter(
+               x=[trig['x']],
+               y=[0],
+               mode='markers',
+               marker=dict(color='red', size=12, symbol='star'),
+               showlegend=False,
+               hoverinfo="none"
+            ))
 
     if has_valid_data:
         # Layout updates
@@ -220,9 +313,7 @@ if uploaded_files:
         # --- Export Data Section ---
         st.divider()
         st.subheader("Export Center")
-        st.write("*(Tip: To download the graph as an image, use the camera icon in the top right corner of the graph)*")
         
-        # Export interactive HTML graph
         html_bytes = fig.to_html(include_plotlyjs="cdn", full_html=True)
         st.download_button(
             label="Download Graph (Interactive HTML)",
