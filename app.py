@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import pyqtgraph as pg  # Used in old app, we'll use plotly or st.line_chart instead
+
 import plotly.express as px
 import plotly.graph_objects as go
 from scipy.signal import savgol_filter
